@@ -38,6 +38,10 @@ CREATE TABLE games_search (
 );
 ```
 
+See
+[games_search.md](https://github.com/itchio/facetembeddings/blob/master/games_search.md)
+for detailed reference of facets stored in `games_search`.
+
 The tool reads `game_id` and `facets` columns in batches, where `facets`
 contains tags as a PostgreSQL tsvector (e.g., `'c.1' 'in.2' 'tg.horror'
 'tg.puzzle'`). Tags are extracted from the tsvector using PostgreSQL's
