@@ -30,6 +30,19 @@ type ItemTags struct {
 	Tags   []string
 }
 
+// shouldFilterTag returns true if the tag should be excluded from embeddings.
+// Filters out negative boolean facets that have low information content.
+func shouldFilterTag(tag string) bool {
+	switch tag {
+	case "n.no":  // Not NSFW (vast majority, low signal)
+		return true
+	case "j.no":  // Not a game jam (common, low signal)
+		return true
+	default:
+		return false
+	}
+}
+
 const selectTagsQuery = `
 SELECT game_id, tsvector_to_array(facets) AS tags
 FROM games_search
@@ -64,6 +77,7 @@ func LoadItemTags(ctx context.Context, db *sql.DB, batchSize int) ([]ItemTags, e
 
 	var items []ItemTags
 	lastID := int64(-1)
+	filteredCount := 0
 
 	for {
 		rows, err := db.QueryContext(ctx, selectTagsQuery, lastID, batchSize)
@@ -81,7 +95,15 @@ func LoadItemTags(ctx context.Context, db *sql.DB, batchSize int) ([]ItemTags, e
 				rows.Close()
 				return nil, fmt.Errorf("scan item tags: %w", err)
 			}
-			item.Tags = append(item.Tags[:0], tagArray...)
+
+			// Filter out negative boolean tags
+			for _, tag := range tagArray {
+				if !shouldFilterTag(tag) {
+					item.Tags = append(item.Tags, tag)
+				} else {
+					filteredCount++
+				}
+			}
 
 			if item.GameID > lastID {
 				lastID = item.GameID
@@ -103,6 +125,10 @@ func LoadItemTags(ctx context.Context, db *sql.DB, batchSize int) ([]ItemTags, e
 		if rowCount < batchSize {
 			break
 		}
+	}
+
+	if filteredCount > 0 {
+		log.Printf("filtered out %d negative boolean tags (n.no, j.no)", filteredCount)
 	}
 
 	return items, nil
