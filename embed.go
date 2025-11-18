@@ -101,8 +101,8 @@ func BuildVocabulary(items []ItemTags, cfg EmbeddingConfig) (Vocabulary, error) 
 	return vocab, nil
 }
 
-// accumulates tag co-occurrence counts in a dense symmetric matrix.
-func BuildCooccurrenceMatrix(items []ItemTags, vocab Vocabulary) *mat.SymDense {
+// computes the Positive Pointwise Mutual Information (PPMI) matrix.
+func BuildPPMIMatrix(items []ItemTags, vocab Vocabulary, minCooccurrence int) *mat.SymDense {
 	n := len(vocab.IndexToTag)
 	co := mat.NewSymDense(n, nil)
 
@@ -127,12 +127,13 @@ func BuildCooccurrenceMatrix(items []ItemTags, vocab Vocabulary) *mat.SymDense {
 			delete(seen, idx)
 		}
 
-		if len(indexBuf) == 0 {
+		if len(indexBuf) < 2 {
 			continue
 		}
 
+		// Count co-occurrences for pairs of unique tags in an item
 		for i := 0; i < len(indexBuf); i++ {
-			for j := i; j < len(indexBuf); j++ {
+			for j := i + 1; j < len(indexBuf); j++ {
 				a := indexBuf[i]
 				b := indexBuf[j]
 				co.SetSym(a, b, co.At(a, b)+1)
@@ -140,7 +141,55 @@ func BuildCooccurrenceMatrix(items []ItemTags, vocab Vocabulary) *mat.SymDense {
 		}
 	}
 
-	return co
+	ApplyMinCooccurrence(co, minCooccurrence)
+
+	var totalPairs float64
+	for i := 0; i < n; i++ {
+		for j := i + 1; j < n; j++ {
+			totalPairs += co.At(i, j)
+		}
+	}
+
+	if totalPairs == 0 {
+		return mat.NewSymDense(n, nil)
+	}
+
+	tagCounts := make([]float64, n)
+	for i := 0; i < n; i++ {
+		for j := 0; j < n; j++ {
+			tagCounts[i] += co.At(i, j)
+		}
+	}
+
+	totalTagObservations := totalPairs * 2.0
+	ppmi := mat.NewSymDense(n, nil)
+
+	for i := 0; i < n; i++ {
+		for j := i; j < n; j++ {
+			co_ij := co.At(i, j)
+			if co_ij == 0 {
+				continue
+			}
+
+			// Diagonal is zero in this co-occurrence model
+			if i == j {
+				continue
+			}
+
+			p_ij := co_ij / totalPairs
+			p_i := tagCounts[i] / totalTagObservations
+			p_j := tagCounts[j] / totalTagObservations
+
+			if p_i == 0 || p_j == 0 {
+				continue
+			}
+
+			pmi := math.Log2(p_ij / (p_i * p_j))
+			ppmi.SetSym(i, j, math.Max(0, pmi))
+		}
+	}
+
+	return ppmi
 }
 
 // removes low-signal entries.
@@ -233,11 +282,10 @@ func RunEmbeddingPipeline(items []ItemTags, cfg EmbeddingConfig) (map[string][]f
 	}
 	log.Printf("built vocabulary of %d tags in %s", len(vocab.IndexToTag), time.Since(vocabStart).Round(time.Millisecond))
 
-	log.Printf("building co-occurrence matrix...")
+	log.Printf("building PPMI matrix...")
 	coStart := time.Now()
-	co := BuildCooccurrenceMatrix(items, vocab)
-	ApplyMinCooccurrence(co, cfg.MinCooccurrence)
-	log.Printf("co-occurrence matrix ready in %s", time.Since(coStart).Round(time.Millisecond))
+	co := BuildPPMIMatrix(items, vocab, cfg.MinCooccurrence)
+	log.Printf("PPMI matrix ready in %s", time.Since(coStart).Round(time.Millisecond))
 
 	log.Printf("running SVD (dim=%d)...", cfg.EmbeddingDim)
 	svdStart := time.Now()
