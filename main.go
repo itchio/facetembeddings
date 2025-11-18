@@ -23,6 +23,7 @@ var defaultEmbeddingConfig = EmbeddingConfig{
 	MinTagFrequency: 5,
 	MaxTags:         20_000,
 	MinCooccurrence: 1,
+	MatrixType:      "ppmi",
 }
 
 func main() {
@@ -95,6 +96,7 @@ func parseFlags() CLIConfig {
 	flag.IntVar(&cfg.MaxTags, "max-tags", cfg.MaxTags, "Maximum number of tags to embed (0 = unlimited)")
 	flag.IntVar(&cfg.MinCooccurrence, "min-cooccurrence", cfg.MinCooccurrence, "Minimum co-occurrence count to keep matrix entries")
 	flag.StringVar(&cfg.TableName, "table", cfg.TableName, "Database table to write embeddings into")
+	flag.StringVar(&cfg.MatrixType, "matrix-type", cfg.MatrixType, `Matrix type to use ("cooc" or "ppmi")`)
 
 	flag.Parse()
 
