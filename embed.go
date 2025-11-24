@@ -18,6 +18,14 @@ type EmbeddingConfig struct {
 	MaxTags         int
 	MinCooccurrence int
 	MatrixType      string
+
+	// Factorization method: "svd" or "als"
+	FactorizationType string
+
+	// ALS-specific parameters
+	ALSIterations     int     // Maximum number of ALS iterations
+	ALSRegularization float64 // Lambda regularization term
+	ALSConvergence    float64 // Convergence threshold for early stopping
 }
 
 // Vocabulary maps tags to indices and exposes metadata.
@@ -316,6 +324,9 @@ func RunEmbeddingPipeline(items []ItemTags, cfg EmbeddingConfig) (map[string][]f
 	if cfg.MinTagFrequency <= 0 {
 		cfg.MinTagFrequency = 1
 	}
+	if cfg.FactorizationType == "" {
+		cfg.FactorizationType = "svd"
+	}
 
 	log.Printf("building vocabulary (min freq=%d, max tags=%d)...", cfg.MinTagFrequency, cfg.MaxTags)
 	vocabStart := time.Now()
@@ -342,13 +353,36 @@ func RunEmbeddingPipeline(items []ItemTags, cfg EmbeddingConfig) (map[string][]f
 		return nil, Vocabulary{}, fmt.Errorf("unknown matrix type: %q", cfg.MatrixType)
 	}
 
-	log.Printf("running SVD (dim=%d)...", cfg.EmbeddingDim)
-	svdStart := time.Now()
-	embeddings, err := ComputeEmbeddings(co, vocab, cfg.EmbeddingDim)
-	if err != nil {
-		return nil, Vocabulary{}, err
+	var embeddings map[string][]float64
+	factStart := time.Now()
+
+	switch cfg.FactorizationType {
+	case "svd":
+		log.Printf("running SVD (dim=%d)...", cfg.EmbeddingDim)
+		embeddings, err = ComputeEmbeddings(co, vocab, cfg.EmbeddingDim)
+		if err != nil {
+			return nil, Vocabulary{}, err
+		}
+		log.Printf("SVD complete in %s", time.Since(factStart).Round(time.Millisecond))
+
+	case "als":
+		log.Printf("running ALS (dim=%d, iterations=%d, lambda=%.4f, convergence=%.2e)...",
+			cfg.EmbeddingDim, cfg.ALSIterations, cfg.ALSRegularization, cfg.ALSConvergence)
+		alsCfg := ALSConfig{
+			Rank:           cfg.EmbeddingDim,
+			MaxIterations:  cfg.ALSIterations,
+			Lambda:         cfg.ALSRegularization,
+			ConvergenceEps: cfg.ALSConvergence,
+		}
+		embeddings, err = ComputeALSEmbeddings(co, vocab, alsCfg)
+		if err != nil {
+			return nil, Vocabulary{}, err
+		}
+		log.Printf("ALS complete in %s", time.Since(factStart).Round(time.Millisecond))
+
+	default:
+		return nil, Vocabulary{}, fmt.Errorf("unknown factorization type: %q (use \"svd\" or \"als\")", cfg.FactorizationType)
 	}
-	log.Printf("svd complete in %s", time.Since(svdStart).Round(time.Millisecond))
 
 	log.Printf("normalizing embeddings...")
 	normStart := time.Now()

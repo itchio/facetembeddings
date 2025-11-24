@@ -19,11 +19,15 @@ type CLIConfig struct {
 const defaultBatchSize = 20000
 
 var defaultEmbeddingConfig = EmbeddingConfig{
-	EmbeddingDim:    32,
-	MinTagFrequency: 5,
-	MaxTags:         20_000,
-	MinCooccurrence: 1,
-	MatrixType:      "ppmi",
+	EmbeddingDim:      32,
+	MinTagFrequency:   5,
+	MaxTags:           20_000,
+	MinCooccurrence:   1,
+	MatrixType:        "ppmi",
+	FactorizationType: "svd",
+	ALSIterations:     15,
+	ALSRegularization: 0.1,
+	ALSConvergence:    1e-4,
 }
 
 func main() {
@@ -97,6 +101,10 @@ func parseFlags() CLIConfig {
 	flag.IntVar(&cfg.MinCooccurrence, "min-cooccurrence", cfg.MinCooccurrence, "Minimum co-occurrence count to keep matrix entries")
 	flag.StringVar(&cfg.TableName, "table", cfg.TableName, "Database table to write embeddings into")
 	flag.StringVar(&cfg.MatrixType, "matrix-type", cfg.MatrixType, `Matrix type to use ("cooc" or "ppmi")`)
+	flag.StringVar(&cfg.FactorizationType, "factorization", cfg.FactorizationType, `Factorization method ("svd" or "als")`)
+	flag.IntVar(&cfg.ALSIterations, "als-iterations", cfg.ALSIterations, "Maximum ALS iterations (only used with -factorization=als)")
+	flag.Float64Var(&cfg.ALSRegularization, "als-lambda", cfg.ALSRegularization, "ALS regularization parameter (only used with -factorization=als)")
+	flag.Float64Var(&cfg.ALSConvergence, "als-convergence", cfg.ALSConvergence, "ALS convergence threshold for early stopping")
 
 	flag.Parse()
 
