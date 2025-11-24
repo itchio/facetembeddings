@@ -85,10 +85,16 @@ The tool is configured via command-line flags.
 | Flag | Description | Default |
 | --- | --- | --- |
 | `-table` | Database table to write embeddings into. | `facet_embeddings` |
+| `-output-file` | If set, write embeddings to this CSV file instead of the database (columns: facet, dim, vector, last_trained_at). | _empty_ |
 | `-embedding-dim` | The dimensionality of the output vectors. | `32` |
 | `-min-tag-frequency` | Minimum number of times a tag must appear across all games to be included in the vocabulary. | `5` |
 | `-max-tags` | Maximum number of unique tags to generate embeddings for, sorted by frequency. `0` means unlimited. | `20000` |
 | `-min-cooccurrence` | Minimum co-occurrence count required to keep an entry in the matrix. Helps prune noise. | `1` |
+| `-matrix-type` | Matrix type: `cooc` (raw co-occurrence) or `ppmi` (positive PMI). | `ppmi` |
+| `-factorization` | Factorization method: `svd` or `als`. | `svd` |
+| `-als-iterations` | Max ALS iterations (used when `-factorization=als`). | `15` |
+| `-als-lambda` | ALS regularization parameter (λ). | `0.1` |
+| `-als-convergence` | ALS early-stop threshold for relative loss change. | `1e-4` |
 | `-batch-size` | Number of game rows to fetch from the database in a single batch. | `20000` |
 
 ### Example
@@ -101,4 +107,3 @@ PGDATABASE=itchio_development ./facetembeddings \
   -embedding-dim=128 \
   -min-tag-frequency=10
 ```
-
