@@ -11,8 +11,9 @@ import (
 )
 
 type CLIConfig struct {
-	BatchSize int
-	TableName string
+	BatchSize  int
+	TableName  string
+	OutputFile string
 	EmbeddingConfig
 }
 
@@ -56,6 +57,15 @@ func main() {
 	}
 	log.Printf("built embeddings for %d tags", len(vocab.IndexToTag))
 
+	if cfg.OutputFile != "" {
+		log.Printf("writing embeddings to file %q...", cfg.OutputFile)
+		if err := WriteEmbeddingsCSV(cfg.OutputFile, embeddings, cfg.EmbeddingDim, time.Now()); err != nil {
+			log.Fatalf("write embeddings to file: %v", err)
+		}
+		log.Printf("wrote %d embeddings to %q in %s", len(embeddings), cfg.OutputFile, time.Since(start).Round(time.Millisecond))
+		return
+	}
+
 	log.Printf("writing embeddings to database table %q...", cfg.TableName)
 	inserted, err := SaveEmbeddings(ctx, db, cfg.TableName, embeddings, cfg.EmbeddingDim)
 	if err != nil {
@@ -93,6 +103,7 @@ func parseFlags() CLIConfig {
 	cfg.BatchSize = defaultBatchSize
 	cfg.EmbeddingConfig = defaultEmbeddingConfig
 	cfg.TableName = "facet_embeddings"
+	cfg.OutputFile = ""
 
 	flag.IntVar(&cfg.BatchSize, "batch-size", cfg.BatchSize, "Number of rows to fetch per DB batch")
 	flag.IntVar(&cfg.EmbeddingDim, "embedding-dim", cfg.EmbeddingDim, "Embedding dimensionality")
@@ -100,6 +111,7 @@ func parseFlags() CLIConfig {
 	flag.IntVar(&cfg.MaxTags, "max-tags", cfg.MaxTags, "Maximum number of tags to embed (0 = unlimited)")
 	flag.IntVar(&cfg.MinCooccurrence, "min-cooccurrence", cfg.MinCooccurrence, "Minimum co-occurrence count to keep matrix entries")
 	flag.StringVar(&cfg.TableName, "table", cfg.TableName, "Database table to write embeddings into")
+	flag.StringVar(&cfg.OutputFile, "output-file", cfg.OutputFile, "If set, write embeddings to CSV file instead of the database")
 	flag.StringVar(&cfg.MatrixType, "matrix-type", cfg.MatrixType, `Matrix type to use ("cooc" or "ppmi")`)
 	flag.StringVar(&cfg.FactorizationType, "factorization", cfg.FactorizationType, `Factorization method ("svd" or "als")`)
 	flag.IntVar(&cfg.ALSIterations, "als-iterations", cfg.ALSIterations, "Maximum ALS iterations (only used with -factorization=als)")
