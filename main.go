@@ -26,6 +26,7 @@ var defaultEmbeddingConfig = EmbeddingConfig{
 	MinCooccurrence:   1,
 	MatrixType:        "ppmi",
 	FactorizationType: "svd",
+	SIFParam:          0.001,
 	ALSIterations:     15,
 	ALSRegularization: 0.1,
 	ALSConvergence:    1e-4,
@@ -51,7 +52,7 @@ func main() {
 	log.Printf("loaded %d items with tags", len(items))
 	logItemDatasetStats(items)
 
-	embeddings, vocab, err := RunEmbeddingPipeline(items, cfg.EmbeddingConfig)
+	embeddings, weights, vocab, err := RunEmbeddingPipeline(items, cfg.EmbeddingConfig)
 	if err != nil {
 		log.Fatalf("compute embeddings: %v", err)
 	}
@@ -59,7 +60,7 @@ func main() {
 
 	if cfg.OutputFile != "" {
 		log.Printf("writing embeddings to file %q...", cfg.OutputFile)
-		if err := WriteEmbeddingsCSV(cfg.OutputFile, embeddings, cfg.EmbeddingDim, time.Now()); err != nil {
+		if err := WriteEmbeddingsCSV(cfg.OutputFile, embeddings, vocab.Frequency, weights, cfg.EmbeddingDim, time.Now()); err != nil {
 			log.Fatalf("write embeddings to file: %v", err)
 		}
 		log.Printf("wrote %d embeddings to %q in %s", len(embeddings), cfg.OutputFile, time.Since(start).Round(time.Millisecond))
@@ -67,7 +68,7 @@ func main() {
 	}
 
 	log.Printf("writing embeddings to database table %q...", cfg.TableName)
-	inserted, err := SaveEmbeddings(ctx, db, cfg.TableName, embeddings, cfg.EmbeddingDim)
+	inserted, err := SaveEmbeddings(ctx, db, cfg.TableName, embeddings, vocab.Frequency, weights, cfg.EmbeddingDim)
 	if err != nil {
 		log.Fatalf("save embeddings: %v", err)
 	}
@@ -113,6 +114,7 @@ func parseFlags() CLIConfig {
 	flag.StringVar(&cfg.TableName, "table", cfg.TableName, "Database table to write embeddings into")
 	flag.StringVar(&cfg.OutputFile, "output-file", cfg.OutputFile, "If set, write embeddings to CSV file instead of the database")
 	flag.StringVar(&cfg.MatrixType, "matrix-type", cfg.MatrixType, `Matrix type to use ("cooc" or "ppmi")`)
+	flag.Float64Var(&cfg.SIFParam, "sif-a", cfg.SIFParam, "SIF pooling-weight parameter a in a/(a+p); vectors are scaled by their weight (<= 0 disables, vectors stay unit length)")
 	flag.StringVar(&cfg.FactorizationType, "factorization", cfg.FactorizationType, `Factorization method ("svd" or "als")`)
 	flag.IntVar(&cfg.ALSIterations, "als-iterations", cfg.ALSIterations, "Maximum ALS iterations (only used with -factorization=als)")
 	flag.Float64Var(&cfg.ALSRegularization, "als-lambda", cfg.ALSRegularization, "ALS regularization parameter (only used with -factorization=als)")

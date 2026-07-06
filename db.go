@@ -134,8 +134,12 @@ func LoadItemTags(ctx context.Context, db *sql.DB, batchSize int) ([]ItemTags, e
 	return items, nil
 }
 
-// truncates and repopulates the facet embeddings table with the resulting vectors
-func SaveEmbeddings(ctx context.Context, db *sql.DB, table string, embeddings map[string][]float64, dim int) (int, error) {
+// truncates and repopulates the facet embeddings table with the resulting
+// vectors. freq holds the per-facet document frequency (number of games the
+// facet appeared on at training time); weights holds the SIF pooling weight
+// already baked into each stored vector's magnitude. Both are stored so the
+// table documents how each vector was scaled.
+func SaveEmbeddings(ctx context.Context, db *sql.DB, table string, embeddings map[string][]float64, freq map[string]int, weights map[string]float64, dim int) (int, error) {
 	if err := ensureEmbeddingsTable(ctx, db, table); err != nil {
 		return 0, fmt.Errorf("ensure tag_embeddings: %w", err)
 	}
@@ -154,8 +158,8 @@ func SaveEmbeddings(ctx context.Context, db *sql.DB, table string, embeddings ma
 	}
 
 	insertSQL := fmt.Sprintf(`
-INSERT INTO %s (facet, dim, vector, last_trained_at)
-VALUES ($1, $2, $3, now())
+INSERT INTO %s (facet, dim, frequency, weight, vector, last_trained_at)
+VALUES ($1, $2, $3, $4, $5, now())
 `, quoteIdentifier(table))
 
 	tags := make([]string, 0, len(embeddings))
@@ -166,7 +170,11 @@ VALUES ($1, $2, $3, now())
 
 	for _, tag := range tags {
 		vec := embeddings[tag]
-		if _, err := tx.ExecContext(ctx, insertSQL, tag, dim, pq.Array(vec)); err != nil {
+		weight := 1.0
+		if w, ok := weights[tag]; ok {
+			weight = w
+		}
+		if _, err := tx.ExecContext(ctx, insertSQL, tag, dim, freq[tag], weight, pq.Array(vec)); err != nil {
 			return 0, fmt.Errorf("insert embedding for %s: %w", tag, err)
 		}
 	}
@@ -183,12 +191,26 @@ func ensureEmbeddingsTable(ctx context.Context, db *sql.DB, table string) error 
 CREATE TABLE IF NOT EXISTS %s (
 	facet text PRIMARY KEY,
 	dim int NOT NULL,
+	frequency integer NOT NULL DEFAULT 0,
+	weight double precision NOT NULL DEFAULT 1,
 	vector double precision[] NOT NULL,
 	last_trained_at timestamp without time zone NOT NULL DEFAULT now()
 );
 `, quoteIdentifier(table))
-	_, err := db.ExecContext(ctx, query)
-	return err
+	if _, err := db.ExecContext(ctx, query); err != nil {
+		return err
+	}
+
+	// upgrade tables created before the frequency/weight columns existed
+	for _, alter := range []string{
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS frequency integer NOT NULL DEFAULT 0`,
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS weight double precision NOT NULL DEFAULT 1`,
+	} {
+		if _, err := db.ExecContext(ctx, fmt.Sprintf(alter, quoteIdentifier(table))); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func quoteIdentifier(id string) string {

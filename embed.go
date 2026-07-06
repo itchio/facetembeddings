@@ -19,6 +19,12 @@ type EmbeddingConfig struct {
 	MinCooccurrence int
 	MatrixType      string
 
+	// SIF pooling-weight parameter (a in a/(a+p)). Each output vector is
+	// scaled by its facet's weight so a plain average of vectors downstream
+	// becomes a frequency-weighted average. <= 0 disables weighting
+	// (vectors stay unit length).
+	SIFParam float64
+
 	// Factorization method: "svd" or "als"
 	FactorizationType string
 
@@ -298,6 +304,39 @@ func ComputeEmbeddings(co *mat.SymDense, vocab Vocabulary, dim int) (map[string]
 	return embeddings, nil
 }
 
+// ComputeFacetWeights returns a SIF-style pooling weight for every vocabulary
+// tag: a/(a+p), where p is the fraction of items carrying the tag. a <= 0
+// returns weight 1 for every tag. Weights are purely statistical; any product
+// policy (eg. minimum influence for monetization/platform facets) is applied
+// at the application layer, which can recover the unit vector via the stored
+// weight.
+func ComputeFacetWeights(vocab Vocabulary, numItems int, a float64) map[string]float64 {
+	weights := make(map[string]float64, len(vocab.Frequency))
+	for tag, freq := range vocab.Frequency {
+		w := 1.0
+		if a > 0 && numItems > 0 {
+			p := float64(freq) / float64(numItems)
+			w = a / (a + p)
+		}
+		weights[tag] = w
+	}
+	return weights
+}
+
+// scales each (unit) embedding by its pooling weight so a plain average of
+// stored vectors downstream becomes a weighted average.
+func ApplyFacetWeights(embeddings map[string][]float64, weights map[string]float64) {
+	for tag, vec := range embeddings {
+		w, ok := weights[tag]
+		if !ok || w == 1 {
+			continue
+		}
+		for i := range vec {
+			vec[i] *= w
+		}
+	}
+}
+
 // scales all vectors to unit length.
 func NormalizeEmbeddings(embeddings map[string][]float64) {
 	for tag, vec := range embeddings {
@@ -316,10 +355,11 @@ func NormalizeEmbeddings(embeddings map[string][]float64) {
 	}
 }
 
-// executes the entire embedding workflow.
-func RunEmbeddingPipeline(items []ItemTags, cfg EmbeddingConfig) (map[string][]float64, Vocabulary, error) {
+// executes the entire embedding workflow. Returned vectors are unit length
+// scaled by their facet's pooling weight (also returned, keyed by facet).
+func RunEmbeddingPipeline(items []ItemTags, cfg EmbeddingConfig) (map[string][]float64, map[string]float64, Vocabulary, error) {
 	if cfg.EmbeddingDim <= 0 {
-		return nil, Vocabulary{}, fmt.Errorf("embedding dim must be positive (got %d)", cfg.EmbeddingDim)
+		return nil, nil, Vocabulary{}, fmt.Errorf("embedding dim must be positive (got %d)", cfg.EmbeddingDim)
 	}
 	if cfg.MinTagFrequency <= 0 {
 		cfg.MinTagFrequency = 1
@@ -332,7 +372,7 @@ func RunEmbeddingPipeline(items []ItemTags, cfg EmbeddingConfig) (map[string][]f
 	vocabStart := time.Now()
 	vocab, err := BuildVocabulary(items, cfg)
 	if err != nil {
-		return nil, Vocabulary{}, err
+		return nil, nil, Vocabulary{}, err
 	}
 	log.Printf("built vocabulary of %d tags in %s", len(vocab.IndexToTag), time.Since(vocabStart).Round(time.Millisecond))
 
@@ -350,7 +390,7 @@ func RunEmbeddingPipeline(items []ItemTags, cfg EmbeddingConfig) (map[string][]f
 		co = BuildPPMIMatrix(items, vocab, cfg.MinCooccurrence)
 		log.Printf("PPMI matrix ready in %s", time.Since(matrixStart).Round(time.Millisecond))
 	default:
-		return nil, Vocabulary{}, fmt.Errorf("unknown matrix type: %q", cfg.MatrixType)
+		return nil, nil, Vocabulary{}, fmt.Errorf("unknown matrix type: %q", cfg.MatrixType)
 	}
 
 	var embeddings map[string][]float64
@@ -361,7 +401,7 @@ func RunEmbeddingPipeline(items []ItemTags, cfg EmbeddingConfig) (map[string][]f
 		log.Printf("running SVD (dim=%d)...", cfg.EmbeddingDim)
 		embeddings, err = ComputeEmbeddings(co, vocab, cfg.EmbeddingDim)
 		if err != nil {
-			return nil, Vocabulary{}, err
+			return nil, nil, Vocabulary{}, err
 		}
 		log.Printf("SVD complete in %s", time.Since(factStart).Round(time.Millisecond))
 
@@ -376,12 +416,12 @@ func RunEmbeddingPipeline(items []ItemTags, cfg EmbeddingConfig) (map[string][]f
 		}
 		embeddings, err = ComputeALSEmbeddings(co, vocab, alsCfg)
 		if err != nil {
-			return nil, Vocabulary{}, err
+			return nil, nil, Vocabulary{}, err
 		}
 		log.Printf("ALS complete in %s", time.Since(factStart).Round(time.Millisecond))
 
 	default:
-		return nil, Vocabulary{}, fmt.Errorf("unknown factorization type: %q (use \"svd\" or \"als\")", cfg.FactorizationType)
+		return nil, nil, Vocabulary{}, fmt.Errorf("unknown factorization type: %q (use \"svd\" or \"als\")", cfg.FactorizationType)
 	}
 
 	log.Printf("normalizing embeddings...")
@@ -389,5 +429,13 @@ func RunEmbeddingPipeline(items []ItemTags, cfg EmbeddingConfig) (map[string][]f
 	NormalizeEmbeddings(embeddings)
 	log.Printf("normalization complete in %s", time.Since(normStart).Round(time.Millisecond))
 
-	return embeddings, vocab, nil
+	weights := ComputeFacetWeights(vocab, len(items), cfg.SIFParam)
+	if cfg.SIFParam > 0 {
+		log.Printf("scaling vectors by SIF pooling weights (a=%g)...", cfg.SIFParam)
+		ApplyFacetWeights(embeddings, weights)
+	} else {
+		log.Printf("SIF weighting disabled (a=%g), vectors stay unit length", cfg.SIFParam)
+	}
+
+	return embeddings, weights, vocab, nil
 }
