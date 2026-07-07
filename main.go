@@ -21,6 +21,10 @@ type CLIConfig struct {
 	// weighted_rating (see itemQualityWeight).
 	QualityWeight bool
 
+	// Neighbors is a comma-separated list of facets to print nearest
+	// neighbors for after training (spot check).
+	Neighbors string
+
 	EmbeddingConfig
 }
 
@@ -29,11 +33,11 @@ const defaultBatchSize = 20000
 var defaultEmbeddingConfig = EmbeddingConfig{
 	EmbeddingDim:      256,
 	MinTagFrequency:   5,
-	MaxTags:           20_000,
+	MaxTags:           0, // uncapped: rsvd removed the compute constraint; MinTagFrequency is the quality gate
 	MinCooccurrence:   1,
 	MatrixType:        "ppmi",
-	FactorizationType: "svd",
-	SIFParam:          0.001,
+	FactorizationType: "rsvd",
+	SIFParam:          0.01,
 	PPMIAlpha:         0.75,
 	PerGameNorm:       true,
 	ALSIterations:     15,
@@ -68,6 +72,10 @@ func main() {
 		log.Fatalf("compute embeddings: %v", err)
 	}
 	log.Printf("built embeddings for %d tags", len(vocab.IndexToTag))
+
+	if cfg.Neighbors != "" {
+		PrintNeighbors(embeddings, strings.Split(cfg.Neighbors, ","), 10)
+	}
 
 	meta := TrainingMeta{
 		Command:         cfg.CommandLine(),
@@ -179,7 +187,8 @@ func parseFlags() CLIConfig {
 	flag.Float64Var(&cfg.PPMIAlpha, "ppmi-alpha", cfg.PPMIAlpha, "PPMI context-distribution smoothing exponent (1 = classic PPMI)")
 	flag.BoolVar(&cfg.PerGameNorm, "per-game-norm", cfg.PerGameNorm, "Normalize each game's co-occurrence mass by its tag count (prevents heavily-tagged pages from dominating)")
 	flag.BoolVar(&cfg.QualityWeight, "quality-weight", true, "Weight each game's co-occurrence contribution by its weighted_rating")
-	flag.StringVar(&cfg.FactorizationType, "factorization", cfg.FactorizationType, `Factorization method ("svd" or "als")`)
+	flag.StringVar(&cfg.Neighbors, "neighbors", "", "Comma-separated facets to print nearest neighbors for after training (spot check)")
+	flag.StringVar(&cfg.FactorizationType, "factorization", cfg.FactorizationType, `Factorization method ("rsvd", "svd" or "als")`)
 	flag.IntVar(&cfg.ALSIterations, "als-iterations", cfg.ALSIterations, "Maximum ALS iterations (only used with -factorization=als)")
 	flag.Float64Var(&cfg.ALSRegularization, "als-lambda", cfg.ALSRegularization, "ALS regularization parameter (only used with -factorization=als)")
 	flag.Float64Var(&cfg.ALSConvergence, "als-convergence", cfg.ALSConvergence, "ALS convergence threshold for early stopping")

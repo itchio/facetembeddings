@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -56,20 +57,24 @@ ORDER BY game_id
 LIMIT $2
 `
 
-// itemQualityWeight maps a game's weighted_rating (Bayesian-smoothed star
-// rating on a 0-5 scale) into a co-occurrence contribution weight in
-// [0.25, 1.0]. Unrated games (NULL or 0) get the midpoint: dampened relative
-// to well-rated games, but not erased. This exists to reduce the influence of
-// spam/keyword-stuffed pages, which concentrate in unrated/low-rated rows.
+// itemQualityWeight maps a game's weighted_rating into a co-occurrence
+// contribution weight in (0.25, 1.0). weighted_rating (game_weighted_rating
+// in the site schema) shrinks the 0-5 star average toward the neutral prior
+// 2.5 when votes are few, then adds log(count)*(average-2.5)/2.5 — so values
+// far below 2.5 mean confidently bad (not "few votes") and the scale is
+// unbounded upward. Unrated games (NULL, or the games_search column's 0
+// default) are treated as exactly neutral, matching what the formula itself
+// yields at count=0; a logistic centered there dampens confidently-bad games
+// below unrated ones and boosts confidently-good ones toward 1.
 func itemQualityWeight(rating sql.NullFloat64) float64 {
-	if !rating.Valid || rating.Float64 <= 0 {
-		return 0.625
+	const neutral = 2.5 // the rating formula's own prior
+	const scale = 2.0   // logistic width, roughly the corpus spread around neutral
+
+	r := neutral
+	if rating.Valid && rating.Float64 != 0 {
+		r = rating.Float64
 	}
-	r := rating.Float64
-	if r > 5 {
-		r = 5
-	}
-	return 0.25 + 0.75*(r/5)
+	return 0.25 + 0.75/(1+math.Exp(-(r-neutral)/scale))
 }
 
 func Connect(ctx context.Context) (*sql.DB, error) {

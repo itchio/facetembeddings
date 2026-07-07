@@ -146,6 +146,7 @@ func itemIncrement(item ItemTags, numTags int, perGameNorm bool) float64 {
 func BuildCooccurrenceMatrix(items []ItemTags, vocab Vocabulary, cfg EmbeddingConfig) *mat.SymDense {
 	n := len(vocab.IndexToTag)
 	co := mat.NewSymDense(n, nil)
+	rawCo := newRawCounter(n, cfg.MinCooccurrence)
 
 	indexBuf := make([]int, 0, 64)
 	seen := make(map[int]struct{}, 64)
@@ -179,11 +180,52 @@ func BuildCooccurrenceMatrix(items []ItemTags, vocab Vocabulary, cfg EmbeddingCo
 				a := indexBuf[i]
 				b := indexBuf[j]
 				co.SetSym(a, b, co.At(a, b)+inc)
+				rawCo.count(a, b)
 			}
 		}
 	}
 
+	rawCo.prune(co, cfg.MinCooccurrence)
+
 	return co
+}
+
+// rawCounter tracks unweighted pair counts (number of games) so that
+// MinCooccurrence keeps its intuitive meaning — "the pair must appear on at
+// least N games" — independent of quality weighting and per-game
+// normalization, which shrink the weighted matrix entries well below 1 per
+// game. Only allocated when pruning is actually requested.
+type rawCounter struct {
+	counts *mat.SymDense
+}
+
+func newRawCounter(n, minCooccurrence int) *rawCounter {
+	if minCooccurrence <= 1 {
+		return &rawCounter{}
+	}
+	return &rawCounter{counts: mat.NewSymDense(n, nil)}
+}
+
+func (r *rawCounter) count(a, b int) {
+	if r.counts == nil {
+		return
+	}
+	r.counts.SetSym(a, b, r.counts.At(a, b)+1)
+}
+
+// prune zeroes entries of co whose raw game count is below minCount.
+func (r *rawCounter) prune(co *mat.SymDense, minCount int) {
+	if r.counts == nil || minCount <= 1 {
+		return
+	}
+	n := co.SymmetricDim()
+	for i := 0; i < n; i++ {
+		for j := i; j < n; j++ {
+			if r.counts.At(i, j) < float64(minCount) {
+				co.SetSym(i, j, 0)
+			}
+		}
+	}
 }
 
 // computes the Positive Pointwise Mutual Information (PPMI) matrix.
@@ -193,6 +235,7 @@ func BuildCooccurrenceMatrix(items []ItemTags, vocab Vocabulary, cfg EmbeddingCo
 func BuildPPMIMatrix(items []ItemTags, vocab Vocabulary, cfg EmbeddingConfig) *mat.SymDense {
 	n := len(vocab.IndexToTag)
 	co := mat.NewSymDense(n, nil)
+	rawCo := newRawCounter(n, cfg.MinCooccurrence)
 
 	indexBuf := make([]int, 0, 64)
 	seen := make(map[int]struct{}, 64)
@@ -227,11 +270,12 @@ func BuildPPMIMatrix(items []ItemTags, vocab Vocabulary, cfg EmbeddingConfig) *m
 				a := indexBuf[i]
 				b := indexBuf[j]
 				co.SetSym(a, b, co.At(a, b)+inc)
+				rawCo.count(a, b)
 			}
 		}
 	}
 
-	ApplyMinCooccurrence(co, cfg.MinCooccurrence)
+	rawCo.prune(co, cfg.MinCooccurrence)
 
 	var totalPairs float64
 	for i := 0; i < n; i++ {
@@ -293,22 +337,6 @@ func BuildPPMIMatrix(items []ItemTags, vocab Vocabulary, cfg EmbeddingConfig) *m
 	}
 
 	return ppmi
-}
-
-// removes low-signal entries.
-func ApplyMinCooccurrence(co *mat.SymDense, minCount int) {
-	if minCount <= 1 {
-		return
-	}
-
-	n := co.SymmetricDim()
-	for i := 0; i < n; i++ {
-		for j := i; j < n; j++ {
-			if co.At(i, j) < float64(minCount) {
-				co.SetSym(i, j, 0)
-			}
-		}
-	}
 }
 
 // runs SVD over the co-occurrence matrix.
@@ -422,6 +450,35 @@ func RunEmbeddingPipeline(items []ItemTags, cfg EmbeddingConfig) (map[string][]f
 	}
 	log.Printf("built vocabulary of %d tags in %s", len(vocab.IndexToTag), time.Since(vocabStart).Round(time.Millisecond))
 
+	// The rsvd path never materializes the dense matrix: sparse accumulation
+	// plus randomized truncated SVD keeps both memory and time proportional
+	// to the number of distinct tag pairs rather than vocabulary squared.
+	if cfg.FactorizationType == "rsvd" {
+		matrixStart := time.Now()
+		log.Printf("building sparse %s matrix (alpha=%g, per-game norm=%v)...", cfg.MatrixType, cfg.PPMIAlpha, cfg.PerGameNorm)
+		sm, err := BuildSparseMatrix(items, vocab, cfg)
+		if err != nil {
+			return nil, nil, Vocabulary{}, err
+		}
+		log.Printf("sparse matrix ready: %d non-zeros in %s", sm.nnz(), time.Since(matrixStart).Round(time.Millisecond))
+
+		factStart := time.Now()
+		log.Printf("running randomized SVD (dim=%d, oversample=%d, power iters=%d)...", cfg.EmbeddingDim, rsvdOversample, rsvdPowerIters)
+		embeddings, err := ComputeRSVDEmbeddings(sm, vocab, cfg.EmbeddingDim)
+		if err != nil {
+			return nil, nil, Vocabulary{}, err
+		}
+		log.Printf("randomized SVD complete in %s", time.Since(factStart).Round(time.Millisecond))
+
+		NormalizeEmbeddings(embeddings)
+		weights := ComputeFacetWeights(vocab, len(items), cfg.SIFParam)
+		if cfg.SIFParam > 0 {
+			log.Printf("scaling vectors by SIF pooling weights (a=%g)...", cfg.SIFParam)
+			ApplyFacetWeights(embeddings, weights)
+		}
+		return embeddings, weights, vocab, nil
+	}
+
 	var co *mat.SymDense
 	matrixStart := time.Now()
 
@@ -429,7 +486,6 @@ func RunEmbeddingPipeline(items []ItemTags, cfg EmbeddingConfig) (map[string][]f
 	case "cooc":
 		log.Printf("building co-occurrence matrix (per-game norm=%v)...", cfg.PerGameNorm)
 		co = BuildCooccurrenceMatrix(items, vocab, cfg)
-		ApplyMinCooccurrence(co, cfg.MinCooccurrence)
 		log.Printf("co-occurrence matrix ready in %s", time.Since(matrixStart).Round(time.Millisecond))
 	case "ppmi":
 		log.Printf("building PPMI matrix (alpha=%g, per-game norm=%v)...", cfg.PPMIAlpha, cfg.PerGameNorm)
@@ -467,7 +523,7 @@ func RunEmbeddingPipeline(items []ItemTags, cfg EmbeddingConfig) (map[string][]f
 		log.Printf("ALS complete in %s", time.Since(factStart).Round(time.Millisecond))
 
 	default:
-		return nil, nil, Vocabulary{}, fmt.Errorf("unknown factorization type: %q (use \"svd\" or \"als\")", cfg.FactorizationType)
+		return nil, nil, Vocabulary{}, fmt.Errorf("unknown factorization type: %q (use \"rsvd\", \"svd\" or \"als\")", cfg.FactorizationType)
 	}
 
 	log.Printf("normalizing embeddings...")

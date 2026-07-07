@@ -38,25 +38,45 @@ func TestItemIncrement(t *testing.T) {
 }
 
 func TestItemQualityWeight(t *testing.T) {
-	// unrated games get the midpoint of [0.25, 1]
-	if got := itemQualityWeight(sql.NullFloat64{}); got != 0.625 {
-		t.Errorf("null rating: want 0.625, got %g", got)
-	}
-	if got := itemQualityWeight(sql.NullFloat64{Valid: true, Float64: 0}); got != 0.625 {
-		t.Errorf("zero rating: want 0.625, got %g", got)
+	neutral := itemQualityWeight(sql.NullFloat64{Valid: true, Float64: 2.5})
+	if neutral != 0.625 {
+		t.Errorf("neutral rating: want 0.625, got %g", neutral)
 	}
 
-	if got := itemQualityWeight(sql.NullFloat64{Valid: true, Float64: 5}); got != 1 {
-		t.Errorf("top rating: want 1, got %g", got)
+	// unrated games (NULL, or the column's 0 default) are treated as neutral,
+	// matching what game_weighted_rating yields at count=0
+	if got := itemQualityWeight(sql.NullFloat64{}); got != neutral {
+		t.Errorf("null rating should equal neutral %g, got %g", neutral, got)
 	}
-	low := itemQualityWeight(sql.NullFloat64{Valid: true, Float64: 1})
-	if low != 0.4 {
-		t.Errorf("1-star rating: want 0.4, got %g", low)
+	if got := itemQualityWeight(sql.NullFloat64{Valid: true, Float64: 0}); got != neutral {
+		t.Errorf("zero (column default) should equal neutral %g, got %g", neutral, got)
 	}
 
-	// ratings above scale are clamped
-	if got := itemQualityWeight(sql.NullFloat64{Valid: true, Float64: 99}); got != 1 {
-		t.Errorf("clamped rating: want 1, got %g", got)
+	// a barely-voted game lands near 2.5 by the formula, so it weighs close
+	// to an unrated one
+	barely := itemQualityWeight(sql.NullFloat64{Valid: true, Float64: 2.65})
+	if math.Abs(barely-neutral) > 0.02 {
+		t.Errorf("barely-voted (~2.5) should sit near neutral %g, got %g", neutral, barely)
+	}
+
+	// confidently-bad games (low or negative values) are dampened below
+	// unrated ones
+	bad := itemQualityWeight(sql.NullFloat64{Valid: true, Float64: 0.0023})
+	worse := itemQualityWeight(sql.NullFloat64{Valid: true, Float64: -1})
+	if !(worse < bad && bad < neutral) {
+		t.Errorf("bad games should weigh below neutral: worse=%g bad=%g neutral=%g",
+			worse, bad, neutral)
+	}
+	if worse <= 0.25 {
+		t.Errorf("weights should stay above the 0.25 floor, got %g", worse)
+	}
+
+	// confidently-good games rise toward (but never reach) 1
+	good := itemQualityWeight(sql.NullFloat64{Valid: true, Float64: 5})
+	top := itemQualityWeight(sql.NullFloat64{Valid: true, Float64: 8.74})
+	if !(neutral < good && good < top && top < 1) {
+		t.Errorf("good games should weigh above neutral: neutral=%g good=%g top=%g",
+			neutral, good, top)
 	}
 }
 
@@ -111,6 +131,29 @@ func TestBuildPPMIMatrixSmoothingDampsRareTags(t *testing.T) {
 	if smoothedGap >= classicGap {
 		t.Errorf("smoothing should shrink rare-pair PMI advantage: classic gap %g, smoothed gap %g",
 			classicGap, smoothedGap)
+	}
+}
+
+func TestMinCooccurrencePrunesOnRawGameCounts(t *testing.T) {
+	vocab := testVocab("a", "b", "c")
+
+	// a-b appears on 2 games but with tiny weighted mass (0.25 total);
+	// a-c appears on 1 game with full weight
+	items := []ItemTags{
+		{Tags: []string{"a", "b"}, Weight: 0.125},
+		{Tags: []string{"a", "b"}, Weight: 0.125},
+		{Tags: []string{"a", "c"}, Weight: 1},
+	}
+
+	co := BuildCooccurrenceMatrix(items, vocab, EmbeddingConfig{MinCooccurrence: 2})
+
+	// a-b survives: 2 games >= 2, despite weighted mass 0.25
+	if got := co.At(0, 1); got != 0.25 {
+		t.Errorf("a-b should survive raw-count pruning with weighted mass 0.25, got %g", got)
+	}
+	// a-c is pruned: only 1 game, despite full weight
+	if got := co.At(0, 2); got != 0 {
+		t.Errorf("a-c should be pruned (1 game < 2), got %g", got)
 	}
 }
 

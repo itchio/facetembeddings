@@ -119,7 +119,7 @@ func TestCommandLineReconstruction(t *testing.T) {
 	for _, want := range []string{
 		"facetembeddings ",
 		"-embedding-dim=256",
-		"-sif-a=0.001",
+		"-sif-a=0.01",
 		"-ppmi-alpha=0.75",
 		"-per-game-norm=true",
 		"-quality-weight=true",
