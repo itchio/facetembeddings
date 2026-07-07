@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -102,5 +103,41 @@ func TestApplyFacetWeights(t *testing.T) {
 	}
 	if !reflect.DeepEqual(embeddings["tg.b"], []float64{0, 1}) {
 		t.Errorf("tg.b should be unchanged: %v", embeddings["tg.b"])
+	}
+}
+
+func TestCommandLineReconstruction(t *testing.T) {
+	cfg := CLIConfig{
+		BatchSize:       20000,
+		TableName:       "facet_embeddings",
+		QualityWeight:   true,
+		EmbeddingConfig: defaultEmbeddingConfig,
+	}
+
+	cmd := cfg.CommandLine()
+
+	for _, want := range []string{
+		"facetembeddings ",
+		"-embedding-dim=256",
+		"-sif-a=0.001",
+		"-ppmi-alpha=0.75",
+		"-per-game-norm=true",
+		"-quality-weight=true",
+		"-matrix-type=ppmi",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("command missing %q: %s", want, cmd)
+		}
+	}
+
+	// ALS flags only appear for ALS runs
+	if strings.Contains(cmd, "-als-") {
+		t.Errorf("svd run should not include ALS flags: %s", cmd)
+	}
+}
+
+func TestQuoteLiteral(t *testing.T) {
+	if got := quoteLiteral("it's a 'test'"); got != "'it''s a ''test'''" {
+		t.Errorf("bad escaping: %s", got)
 	}
 }

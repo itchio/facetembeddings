@@ -25,6 +25,17 @@ type EmbeddingConfig struct {
 	// (vectors stay unit length).
 	SIFParam float64
 
+	// PPMI context-distribution smoothing exponent (Levy et al. 2015).
+	// Marginal probabilities are computed from counts^alpha, which damps
+	// PMI's bias toward rare tags. 1 reproduces classic PPMI.
+	PPMIAlpha float64
+
+	// When set, each item's pair increments are divided by (numTags-1) so
+	// every game contributes total co-occurrence mass proportional to its
+	// tag count rather than its square (prevents heavily-tagged pages from
+	// dominating the matrix).
+	PerGameNorm bool
+
 	// Factorization method: "svd" or "als"
 	FactorizationType string
 
@@ -116,8 +127,23 @@ func BuildVocabulary(items []ItemTags, cfg EmbeddingConfig) (Vocabulary, error) 
 	return vocab, nil
 }
 
+// itemIncrement computes how much a single item adds to each of its tag
+// pairs: its quality weight (1 when weighting is disabled), optionally
+// divided by (numTags-1) so total contributed mass grows linearly with tag
+// count instead of quadratically.
+func itemIncrement(item ItemTags, numTags int, perGameNorm bool) float64 {
+	w := item.Weight
+	if w <= 0 {
+		w = 1
+	}
+	if perGameNorm && numTags > 1 {
+		w /= float64(numTags - 1)
+	}
+	return w
+}
+
 // accumulates tag co-occurrence counts in a dense symmetric matrix.
-func BuildCooccurrenceMatrix(items []ItemTags, vocab Vocabulary) *mat.SymDense {
+func BuildCooccurrenceMatrix(items []ItemTags, vocab Vocabulary, cfg EmbeddingConfig) *mat.SymDense {
 	n := len(vocab.IndexToTag)
 	co := mat.NewSymDense(n, nil)
 
@@ -146,11 +172,13 @@ func BuildCooccurrenceMatrix(items []ItemTags, vocab Vocabulary) *mat.SymDense {
 			continue
 		}
 
+		inc := itemIncrement(item, len(indexBuf), cfg.PerGameNorm)
+
 		for i := 0; i < len(indexBuf); i++ {
 			for j := i; j < len(indexBuf); j++ {
 				a := indexBuf[i]
 				b := indexBuf[j]
-				co.SetSym(a, b, co.At(a, b)+1)
+				co.SetSym(a, b, co.At(a, b)+inc)
 			}
 		}
 	}
@@ -159,7 +187,10 @@ func BuildCooccurrenceMatrix(items []ItemTags, vocab Vocabulary) *mat.SymDense {
 }
 
 // computes the Positive Pointwise Mutual Information (PPMI) matrix.
-func BuildPPMIMatrix(items []ItemTags, vocab Vocabulary, minCooccurrence int) *mat.SymDense {
+// Marginal probabilities are smoothed with cfg.PPMIAlpha (counts^alpha,
+// renormalized), which damps PMI's overestimation of associations involving
+// rare tags; alpha=1 gives classic PPMI.
+func BuildPPMIMatrix(items []ItemTags, vocab Vocabulary, cfg EmbeddingConfig) *mat.SymDense {
 	n := len(vocab.IndexToTag)
 	co := mat.NewSymDense(n, nil)
 
@@ -188,17 +219,19 @@ func BuildPPMIMatrix(items []ItemTags, vocab Vocabulary, minCooccurrence int) *m
 			continue
 		}
 
+		inc := itemIncrement(item, len(indexBuf), cfg.PerGameNorm)
+
 		// Count co-occurrences for pairs of unique tags in an item
 		for i := 0; i < len(indexBuf); i++ {
 			for j := i + 1; j < len(indexBuf); j++ {
 				a := indexBuf[i]
 				b := indexBuf[j]
-				co.SetSym(a, b, co.At(a, b)+1)
+				co.SetSym(a, b, co.At(a, b)+inc)
 			}
 		}
 	}
 
-	ApplyMinCooccurrence(co, minCooccurrence)
+	ApplyMinCooccurrence(co, cfg.MinCooccurrence)
 
 	var totalPairs float64
 	for i := 0; i < n; i++ {
@@ -218,7 +251,20 @@ func BuildPPMIMatrix(items []ItemTags, vocab Vocabulary, minCooccurrence int) *m
 		}
 	}
 
-	totalTagObservations := totalPairs * 2.0
+	alpha := cfg.PPMIAlpha
+	if alpha <= 0 {
+		alpha = 1
+	}
+
+	// Smoothed marginal: p_i = counts_i^alpha / sum_k counts_k^alpha.
+	// At alpha=1 this is exactly counts_i / (2 * totalPairs).
+	var smoothedTotal float64
+	smoothedCounts := make([]float64, n)
+	for i := 0; i < n; i++ {
+		smoothedCounts[i] = math.Pow(tagCounts[i], alpha)
+		smoothedTotal += smoothedCounts[i]
+	}
+
 	ppmi := mat.NewSymDense(n, nil)
 
 	for i := 0; i < n; i++ {
@@ -234,8 +280,8 @@ func BuildPPMIMatrix(items []ItemTags, vocab Vocabulary, minCooccurrence int) *m
 			}
 
 			p_ij := co_ij / totalPairs
-			p_i := tagCounts[i] / totalTagObservations
-			p_j := tagCounts[j] / totalTagObservations
+			p_i := smoothedCounts[i] / smoothedTotal
+			p_j := smoothedCounts[j] / smoothedTotal
 
 			if p_i == 0 || p_j == 0 {
 				continue
@@ -381,13 +427,13 @@ func RunEmbeddingPipeline(items []ItemTags, cfg EmbeddingConfig) (map[string][]f
 
 	switch cfg.MatrixType {
 	case "cooc":
-		log.Printf("building co-occurrence matrix...")
-		co = BuildCooccurrenceMatrix(items, vocab)
+		log.Printf("building co-occurrence matrix (per-game norm=%v)...", cfg.PerGameNorm)
+		co = BuildCooccurrenceMatrix(items, vocab, cfg)
 		ApplyMinCooccurrence(co, cfg.MinCooccurrence)
 		log.Printf("co-occurrence matrix ready in %s", time.Since(matrixStart).Round(time.Millisecond))
 	case "ppmi":
-		log.Printf("building PPMI matrix...")
-		co = BuildPPMIMatrix(items, vocab, cfg.MinCooccurrence)
+		log.Printf("building PPMI matrix (alpha=%g, per-game norm=%v)...", cfg.PPMIAlpha, cfg.PerGameNorm)
+		co = BuildPPMIMatrix(items, vocab, cfg)
 		log.Printf("PPMI matrix ready in %s", time.Since(matrixStart).Round(time.Millisecond))
 	default:
 		return nil, nil, Vocabulary{}, fmt.Errorf("unknown matrix type: %q", cfg.MatrixType)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -60,6 +61,19 @@ func WriteEmbeddingsCSV(path string, embeddings map[string][]float64, freq map[s
 		return fmt.Errorf("flush csv: %w", err)
 	}
 
+	return nil
+}
+
+// WriteMetaJSON writes the training metadata sidecar next to a CSV export
+// (path should be the CSV path; ".meta.json" is appended).
+func WriteMetaJSON(csvPath string, meta TrainingMeta) error {
+	payload, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal training meta: %w", err)
+	}
+	if err := os.WriteFile(csvPath+".meta.json", append(payload, '\n'), 0o644); err != nil {
+		return fmt.Errorf("write meta sidecar: %w", err)
+	}
 	return nil
 }
 

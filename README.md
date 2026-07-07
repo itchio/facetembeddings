@@ -20,7 +20,7 @@ find related content. These vectors know as **embeddings**.
 
 ### The Algorithm
 
-1.  **Build a Co-occurrence Matrix**: The algorithm first constructs a large, symmetric matrix where rows and columns represent the unique tags from the vocabulary. A cell at `(row_i, col_j)` stores the number of times `tag_i` and `tag_j` appeared together on the same game. This matrix captures the raw co-occurrence relationship between all pairs of tags.
+1.  **Build a Co-occurrence Matrix**: The algorithm first constructs a large, symmetric matrix where rows and columns represent the unique tags from the vocabulary. A cell at `(row_i, col_j)` accumulates a weighted count of the games where `tag_i` and `tag_j` appeared together. Each game's contribution is scaled by its `weighted_rating` (mapped into `[0.25, 1.0]`, unrated games at the midpoint) so spam/keyword-stuffed pages carry less influence, and divided by its tag count so heavily-tagged pages contribute mass linearly rather than quadratically. When the PPMI transform is used, marginal probabilities are smoothed with a 0.75 exponent (Levy et al. 2015) to damp PMI's bias toward rare tags.
 2.  **Apply SVD for Dimensionality Reduction**: The co-occurrence matrix is often very large and noisy. To distill the most significant patterns, **Singular Value Decomposition (SVD)** is used. SVD factorizes the matrix into three separate matrices, capturing its underlying structure. This step effectively reduces the dimensionality of the data, filtering out noise and retaining the strongest signals.
 3.  **Extract Embeddings**: The final embedding for each tag is a dense vector derived from the SVD output. By taking the top `N` dimensions (e.g., 32 or 64), we get a low-dimensional representation that captures the essence of the tag's relationship with all other tags. Each tag is now represented by a point in an `N`-dimensional space.
 4.  **Normalize, Weight, and Store**: The vectors are normalized to unit length, then scaled by a per-facet SIF pooling weight (`a / (a + p)`, where `p` is the fraction of games carrying the facet) before being saved to a database table. Because the weight is baked into each vector's magnitude, a plain average of a game's facet vectors downstream is automatically a frequency-weighted average: ultra-common facets (`m.free`, `p.web`, ...) contribute little, while rare distinctive tags dominate. The weights are purely statistical; any product policy (eg. guaranteeing a minimum influence for monetization or platform facets) belongs in the application layer, which can recover a facet's unit vector by dividing the stored vector by its `weight` column.
@@ -75,6 +75,16 @@ This output table stores one row per unique tag, where:
 
 The table is created automatically if it doesn't exist and is truncated on each run before inserting new embeddings.
 
+Every run also records the exact command and corpus stats behind the
+embeddings so they can be recovered later:
+
+- Database runs set the table's `COMMENT` to the equivalent CLI invocation
+  plus item/tag counts and timing. Because it's a table comment, it travels
+  with `pg_dump`/.sql exports of the table (view it with `\dt+` or
+  `obj_description('facet_embeddings'::regclass)`).
+- CSV runs write a `<output-file>.meta.json` sidecar with the same
+  information plus the full config as JSON.
+
 ## Build
 
 ```sh
@@ -96,7 +106,10 @@ The tool is configured via command-line flags.
 | `-table` | Database table to write embeddings into. | `facet_embeddings` |
 | `-output-file` | If set, write embeddings to this CSV file instead of the database (columns: facet, dim, frequency, weight, vector, last_trained_at). | _empty_ |
 | `-sif-a` | SIF pooling-weight parameter `a` in `a/(a+p)`. Output vectors are scaled by their facet's weight. Set to `0` or below to disable weighting (vectors stay unit length). | `0.001` |
-| `-embedding-dim` | The dimensionality of the output vectors. | `32` |
+| `-ppmi-alpha` | PPMI context-distribution smoothing exponent. `1` reproduces classic (unsmoothed) PPMI. | `0.75` |
+| `-quality-weight` | Weight each game's co-occurrence contribution by its `weighted_rating` (mapped into `[0.25, 1.0]`; unrated games get `0.625`). | `true` |
+| `-per-game-norm` | Divide each game's pair increments by its tag count minus one, so total contributed mass is linear in tag count. | `true` |
+| `-embedding-dim` | The dimensionality of the output vectors. | `256` |
 | `-min-tag-frequency` | Minimum number of times a tag must appear across all games to be included in the vocabulary. | `5` |
 | `-max-tags` | Maximum number of unique tags to generate embeddings for, sorted by frequency. `0` means unlimited. | `20000` |
 | `-min-cooccurrence` | Minimum co-occurrence count required to keep an entry in the matrix. Helps prune noise. | `1` |
