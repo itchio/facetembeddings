@@ -21,16 +21,6 @@ type CLIConfig struct {
 	// weighted_rating (see itemQualityWeight).
 	QualityWeight bool
 
-	// CreatorTokens adds a uid.<user_id> token to each game at training time
-	// (experimental; see LoadItemTags).
-	CreatorTokens bool
-
-	// CreatorContextWeight, when > 0, appends one synthetic training context
-	// per creator holding their recurring signature tags, weighted by this
-	// value relative to a real game. Vocabulary-neutral (see
-	// BuildCreatorContexts).
-	CreatorContextWeight float64
-
 	// Neighbors is a comma-separated list of facets to print nearest
 	// neighbors for after training (spot check).
 	Neighbors string
@@ -70,7 +60,7 @@ func main() {
 	log.Printf("effective config: %+v", cfg)
 
 	log.Printf("loading item tags (batch size=%d, quality weight=%v)...", cfg.BatchSize, cfg.QualityWeight)
-	items, err := LoadItemTags(ctx, db, cfg.BatchSize, cfg.QualityWeight, cfg.CreatorTokens, cfg.CreatorContextWeight)
+	items, err := LoadItemTags(ctx, db, cfg.BatchSize, cfg.QualityWeight)
 	if err != nil {
 		log.Fatalf("load item tags: %v", err)
 	}
@@ -137,8 +127,6 @@ func (cfg CLIConfig) CommandLine() string {
 		fmt.Sprintf("-ppmi-alpha=%g", cfg.PPMIAlpha),
 		fmt.Sprintf("-per-game-norm=%v", cfg.PerGameNorm),
 		fmt.Sprintf("-quality-weight=%v", cfg.QualityWeight),
-		fmt.Sprintf("-creator-tokens=%v", cfg.CreatorTokens),
-		fmt.Sprintf("-creator-context-weight=%g", cfg.CreatorContextWeight),
 		fmt.Sprintf("-batch-size=%d", cfg.BatchSize),
 	}
 
@@ -200,8 +188,6 @@ func parseFlags() CLIConfig {
 	flag.BoolVar(&cfg.PerGameNorm, "per-game-norm", cfg.PerGameNorm, "Normalize each game's co-occurrence mass by its tag count (prevents heavily-tagged pages from dominating)")
 	flag.BoolVar(&cfg.QualityWeight, "quality-weight", true, "Weight each game's co-occurrence contribution by its weighted_rating")
 	flag.StringVar(&cfg.Neighbors, "neighbors", "", "Comma-separated facets to print nearest neighbors for after training (spot check)")
-	flag.BoolVar(&cfg.CreatorTokens, "creator-tokens", false, "Add a uid.<user_id> creator token to each game at training time (experimental)")
-	flag.Float64Var(&cfg.CreatorContextWeight, "creator-context-weight", 0, "If > 0, add one synthetic context per creator with their recurring signature tags, at this weight relative to a real game (vocabulary-neutral portfolio signal)")
 	flag.StringVar(&cfg.FactorizationType, "factorization", cfg.FactorizationType, `Factorization method ("rsvd", "svd" or "als")`)
 	flag.IntVar(&cfg.ALSIterations, "als-iterations", cfg.ALSIterations, "Maximum ALS iterations (only used with -factorization=als)")
 	flag.Float64Var(&cfg.ALSRegularization, "als-lambda", cfg.ALSRegularization, "ALS regularization parameter (only used with -factorization=als)")

@@ -26,8 +26,7 @@ func init() {
 	log.Printf("Database: %s", dbConnString)
 }
 
-// ItemTags represents the tags attached to a single game, or a synthetic
-// training context (eg. a creator's portfolio).
+// ItemTags represents the tags attached to a single game.
 type ItemTags struct {
 	GameID int64
 	Tags   []string
@@ -35,12 +34,6 @@ type ItemTags struct {
 	// Weight scales this item's contribution to co-occurrence counts
 	// (quality weighting). 1 when quality weighting is disabled.
 	Weight float64
-
-	// Synthetic marks non-game contexts (creator portfolios). They
-	// contribute co-occurrence evidence but are excluded from vocabulary
-	// and frequency counting, so tag gating and SIF weights depend only on
-	// real games.
-	Synthetic bool
 }
 
 // shouldFilterTag returns true if the tag should be excluded from embeddings.
@@ -57,75 +50,12 @@ func shouldFilterTag(tag string) bool {
 }
 
 const selectTagsQuery = `
-SELECT game_id, tsvector_to_array(facets) AS tags, weighted_rating, NULL::integer AS user_id
+SELECT game_id, tsvector_to_array(facets) AS tags, weighted_rating
 FROM games_search
 WHERE facets IS NOT NULL AND game_id > $1
 ORDER BY game_id
 LIMIT $2
 `
-
-// joins the games table so each item can carry a uid.<user_id> creator token
-const selectTagsWithCreatorQuery = `
-SELECT gs.game_id, tsvector_to_array(gs.facets) AS tags, gs.weighted_rating, g.user_id
-FROM games_search gs
-LEFT JOIN games g ON g.id = gs.game_id
-WHERE gs.facets IS NOT NULL AND gs.game_id > $1
-ORDER BY gs.game_id
-LIMIT $2
-`
-
-const (
-	// a tag must recur on this many of a creator's games to count as part of
-	// their signature (one-off tags are noise, recurrence is style)
-	creatorSignatureMinGames = 2
-	// cap signature size so prolific catalogs don't produce huge contexts
-	creatorSignatureMaxTags = 32
-)
-
-// BuildCreatorContexts converts per-creator tag counts into synthetic
-// training items: one context per creator holding their signature tags,
-// weighted by contextWeight (a fraction of a real game's contribution). This
-// injects portfolio-level co-occurrence evidence without adding any tokens to
-// the vocabulary — the conservative alternative to -creator-tokens.
-func BuildCreatorContexts(counts map[int64]map[string]int, contextWeight float64) []ItemTags {
-	var out []ItemTags
-	for userID, tagCounts := range counts {
-		type tagCount struct {
-			tag string
-			n   int
-		}
-		var sig []tagCount
-		for tag, n := range tagCounts {
-			if n >= creatorSignatureMinGames {
-				sig = append(sig, tagCount{tag, n})
-			}
-		}
-		if len(sig) < 2 {
-			continue
-		}
-		sort.Slice(sig, func(i, j int) bool {
-			if sig[i].n == sig[j].n {
-				return sig[i].tag < sig[j].tag
-			}
-			return sig[i].n > sig[j].n
-		})
-		if len(sig) > creatorSignatureMaxTags {
-			sig = sig[:creatorSignatureMaxTags]
-		}
-
-		tags := make([]string, len(sig))
-		for i, s := range sig {
-			tags[i] = s.tag
-		}
-		out = append(out, ItemTags{
-			GameID:    -userID, // synthetic; negative to avoid game id collisions in logs
-			Tags:      tags,
-			Weight:    contextWeight,
-			Synthetic: true,
-		})
-	}
-	return out
-}
 
 // itemQualityWeight maps a game's weighted_rating into a co-occurrence
 // contribution weight in (0.25, 1.0). weighted_rating (game_weighted_rating
@@ -167,28 +97,10 @@ func Connect(ctx context.Context) (*sql.DB, error) {
 
 // streams game/tag rows ordered by game_id in batches. When qualityWeight is
 // set, each item's co-occurrence contribution is scaled by its weighted_rating
-// (see itemQualityWeight); otherwise every item weighs 1. When creatorTokens
-// is set, each item additionally carries a uid.<user_id> token (joined from
-// the games table) so creators with enough games get style vectors of their
-// own; creators below -min-tag-frequency are dropped by the vocabulary gate
-// like any other rare tag. These tokens are training-side only — they are not
-// part of games_search.facets, so site-side pooled game vectors never include
-// them implicitly. When creatorContextWeight > 0, a synthetic portfolio
-// context per creator is appended instead (see BuildCreatorContexts) — the
-// vocabulary-neutral alternative.
-func LoadItemTags(ctx context.Context, db *sql.DB, batchSize int, qualityWeight, creatorTokens bool, creatorContextWeight float64) ([]ItemTags, error) {
+// (see itemQualityWeight); otherwise every item weighs 1.
+func LoadItemTags(ctx context.Context, db *sql.DB, batchSize int, qualityWeight bool) ([]ItemTags, error) {
 	if batchSize <= 0 {
 		batchSize = 10_000
-	}
-
-	query := selectTagsQuery
-	if creatorTokens || creatorContextWeight > 0 {
-		query = selectTagsWithCreatorQuery
-	}
-
-	var creatorTagCounts map[int64]map[string]int
-	if creatorContextWeight > 0 {
-		creatorTagCounts = make(map[int64]map[string]int)
 	}
 
 	var items []ItemTags
@@ -196,7 +108,7 @@ func LoadItemTags(ctx context.Context, db *sql.DB, batchSize int, qualityWeight,
 	filteredCount := 0
 
 	for {
-		rows, err := db.QueryContext(ctx, query, lastID, batchSize)
+		rows, err := db.QueryContext(ctx, selectTagsQuery, lastID, batchSize)
 		if err != nil {
 			return nil, fmt.Errorf("query item tags: %w", err)
 		}
@@ -208,14 +120,9 @@ func LoadItemTags(ctx context.Context, db *sql.DB, batchSize int, qualityWeight,
 			var item ItemTags
 			var tagArray pq.StringArray
 			var rating sql.NullFloat64
-			var userID sql.NullInt64
-			if err := rows.Scan(&item.GameID, &tagArray, &rating, &userID); err != nil {
+			if err := rows.Scan(&item.GameID, &tagArray, &rating); err != nil {
 				rows.Close()
 				return nil, fmt.Errorf("scan item tags: %w", err)
-			}
-
-			if creatorTokens && userID.Valid {
-				tagArray = append(tagArray, fmt.Sprintf("uid.%d", userID.Int64))
 			}
 
 			item.Weight = 1
@@ -240,17 +147,6 @@ func LoadItemTags(ctx context.Context, db *sql.DB, batchSize int, qualityWeight,
 				continue
 			}
 
-			if creatorTagCounts != nil && userID.Valid {
-				counts := creatorTagCounts[userID.Int64]
-				if counts == nil {
-					counts = make(map[string]int)
-					creatorTagCounts[userID.Int64] = counts
-				}
-				for _, tag := range item.Tags {
-					counts[tag]++
-				}
-			}
-
 			items = append(items, item)
 		}
 
@@ -267,12 +163,6 @@ func LoadItemTags(ctx context.Context, db *sql.DB, batchSize int, qualityWeight,
 
 	if filteredCount > 0 {
 		log.Printf("filtered out %d negative boolean tags (n.no, j.no)", filteredCount)
-	}
-
-	if creatorTagCounts != nil {
-		contexts := BuildCreatorContexts(creatorTagCounts, creatorContextWeight)
-		log.Printf("creator contexts: %d portfolios with >=2 signature tags (weight=%g)", len(contexts), creatorContextWeight)
-		items = append(items, contexts...)
 	}
 
 	return items, nil

@@ -57,9 +57,6 @@ func BuildVocabulary(items []ItemTags, cfg EmbeddingConfig) (Vocabulary, error) 
 	freq := make(map[string]int)
 	totalAssignments := 0
 	for _, item := range items {
-		if item.Synthetic {
-			continue
-		}
 		for _, tag := range item.Tags {
 			freq[tag]++
 			totalAssignments++
@@ -445,16 +442,6 @@ func RunEmbeddingPipeline(items []ItemTags, cfg EmbeddingConfig) (map[string][]f
 		cfg.FactorizationType = "svd"
 	}
 
-	// SIF weights depend on p(facet) over real games; synthetic contexts
-	// (creator portfolios) are excluded from that denominator just as they
-	// are from vocabulary counting
-	realItems := 0
-	for _, item := range items {
-		if !item.Synthetic {
-			realItems++
-		}
-	}
-
 	log.Printf("building vocabulary (min freq=%d, max tags=%d)...", cfg.MinTagFrequency, cfg.MaxTags)
 	vocabStart := time.Now()
 	vocab, err := BuildVocabulary(items, cfg)
@@ -484,7 +471,7 @@ func RunEmbeddingPipeline(items []ItemTags, cfg EmbeddingConfig) (map[string][]f
 		log.Printf("randomized SVD complete in %s", time.Since(factStart).Round(time.Millisecond))
 
 		NormalizeEmbeddings(embeddings)
-		weights := ComputeFacetWeights(vocab, realItems, cfg.SIFParam)
+		weights := ComputeFacetWeights(vocab, len(items), cfg.SIFParam)
 		if cfg.SIFParam > 0 {
 			log.Printf("scaling vectors by SIF pooling weights (a=%g)...", cfg.SIFParam)
 			ApplyFacetWeights(embeddings, weights)
@@ -544,7 +531,7 @@ func RunEmbeddingPipeline(items []ItemTags, cfg EmbeddingConfig) (map[string][]f
 	NormalizeEmbeddings(embeddings)
 	log.Printf("normalization complete in %s", time.Since(normStart).Round(time.Millisecond))
 
-	weights := ComputeFacetWeights(vocab, realItems, cfg.SIFParam)
+	weights := ComputeFacetWeights(vocab, len(items), cfg.SIFParam)
 	if cfg.SIFParam > 0 {
 		log.Printf("scaling vectors by SIF pooling weights (a=%g)...", cfg.SIFParam)
 		ApplyFacetWeights(embeddings, weights)
