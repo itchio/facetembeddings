@@ -183,3 +183,47 @@ func TestCooccurrenceQualityWeightingAndNorm(t *testing.T) {
 		t.Errorf("per-game norm: 3-tag game pair should count 1/2, got %g", got)
 	}
 }
+
+func TestBuildCreatorContexts(t *testing.T) {
+	counts := map[int64]map[string]int{
+		// signature = tags on >=2 games: horror(3), pixel-art(2)
+		100: {"tg.horror": 3, "tg.pixel-art": 2, "tg.one-off": 1},
+		// only one recurring tag -> no context (needs >=2 signature tags)
+		200: {"tg.puzzle": 5, "tg.stray": 1},
+		// nothing recurring -> no context
+		300: {"tg.a": 1, "tg.b": 1},
+	}
+
+	contexts := BuildCreatorContexts(counts, 0.25)
+
+	if len(contexts) != 1 {
+		t.Fatalf("want 1 context, got %d", len(contexts))
+	}
+	c := contexts[0]
+	if !c.Synthetic || c.Weight != 0.25 || c.GameID != -100 {
+		t.Errorf("bad context metadata: %+v", c)
+	}
+	if len(c.Tags) != 2 || c.Tags[0] != "tg.horror" || c.Tags[1] != "tg.pixel-art" {
+		t.Errorf("bad signature tags: %v", c.Tags)
+	}
+}
+
+func TestVocabularyIgnoresSyntheticItems(t *testing.T) {
+	items := []ItemTags{
+		{Tags: []string{"tg.real", "tg.other"}, Weight: 1},
+		{Tags: []string{"tg.real", "tg.other"}, Weight: 1},
+		{Tags: []string{"tg.real", "tg.synthetic-only"}, Weight: 0.25, Synthetic: true},
+	}
+
+	vocab, err := BuildVocabulary(items, EmbeddingConfig{MinTagFrequency: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := vocab.TagToIndex["tg.synthetic-only"]; ok {
+		t.Error("synthetic-only tag should not enter the vocabulary")
+	}
+	if vocab.Frequency["tg.real"] != 2 {
+		t.Errorf("synthetic items should not count toward frequency: got %d", vocab.Frequency["tg.real"])
+	}
+}

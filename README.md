@@ -119,6 +119,38 @@ The tool is configured via command-line flags.
 | `-als-lambda` | ALS regularization parameter (λ). | `0.1` |
 | `-als-convergence` | ALS early-stop threshold for relative loss change. | `1e-4` |
 | `-batch-size` | Number of game rows to fetch from the database in a single batch. | `20000` |
+| `-neighbors` | Comma-separated facets to print the top-10 nearest neighbors for (by cosine) after training. Purely a log-output sanity check — has no effect on the generated embeddings. Pick tags whose neighborhoods you can judge at a glance. | _empty_ |
+| `-creator-tokens` | Experimental: add a `uid.<user_id>` token to each game at training time (joined from the `games` table), giving creators with ≥`-min-tag-frequency` games a queryable style vector. Training-side only — the tokens are not in `games_search.facets`, so site-pooled game vectors never include them. Note this substantially reshapes tag geometry too (~50% of tag top-10 neighbor lists change), so train into a separate table for creator-similarity features rather than replacing the main tag embeddings. | `false` |
+| `-creator-context-weight` | The vocabulary-neutral alternative to `-creator-tokens`: if > 0, appends one synthetic training context per creator containing their signature tags (tags recurring on ≥2 of their games, capped at 32), weighted by this value relative to a real game. Injects portfolio-level co-occurrence without adding any tokens — vocabulary, frequencies, and SIF weights are unchanged. Measured tag-geometry shift vs the noise floor of ~0.9 top-10 overlap: `0.25` → 0.86 overlap, `0.5` → 0.83. | `0` |
+
+### Production build
+
+The defaults are the production configuration, so a full rebuild is:
+
+```sh
+./facetembeddings \
+  -neighbors="tg.horror,tg.roguelike,tg.visual-novel,tg.liminal-space,tg.farming,tl.14"
+```
+
+This trains the full vocabulary (all facets on ≥5 games, ~25k) at 256
+dimensions with randomized SVD, quality-weighted smoothed-PPMI counts, and SIF
+pooling weights baked into the vector magnitudes, writing to
+`facet_embeddings`. It completes in a minute or two. Before shipping the
+table, read the `neighbors of ...` lines in the log and confirm the lists
+look sane (e.g. `tg.horror` → `tg.survival-horror`, `tg.psychological-horror`).
+
+To move the result to another instance, export the table — the table `COMMENT`
+recording the exact command travels with the dump:
+
+```sh
+pg_dump -U postgres --clean -t facet_embeddings itchio > facet_embeddings.sql
+```
+
+> Note: the vectors are scaled by SIF weights, which drive near-universal
+> facets (`m.free`, `p.web`, `c.1`, ...) close to zero. Consumers that want a
+> guaranteed soft nudge from those facet classes must re-lift them at pooling
+> time using the `weight` column (divide the vector by `weight` to recover the
+> unit direction, then rescale to a floor).
 
 ### Example
 
